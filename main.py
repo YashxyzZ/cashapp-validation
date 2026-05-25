@@ -74,6 +74,7 @@ def match_remittance(record: ReceiptRecord):
         customer_name=record.customer_name,
         payment_reference=record.payment_reference,
         payment_date=record.payment_date,
+        header_id=record.header_id,
         total_amount=record.total_amount,
         confidence_label=record.confidence_label,
         confidence_score=record.confidence_score,

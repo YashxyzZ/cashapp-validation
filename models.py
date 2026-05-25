@@ -7,6 +7,7 @@ from typing import Optional, List, Union
 class InvoiceItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
+    Line_ID: Optional[int] = None
     invoice_number: Optional[str] = None
     invoice_date: Optional[str] = None
     invoice_amount: Optional[float] = None
@@ -34,6 +35,7 @@ class ReceiptRecord(BaseModel):
     customer_name: str
     payment_reference: Optional[str] = None
     payment_date: Optional[str] = None
+    header_id: Optional[int] = None
     total_amount: Optional[float] = None
     confidence_label: Optional[str] = None
     confidence_score: Optional[Union[int, float]] = None
@@ -60,6 +62,7 @@ class ReceiptRecord(BaseModel):
 # ── Output Models (Validated / Fused) ──
 
 class FusedInvoiceItem(BaseModel):
+    Line_ID: Optional[int] = None
     invoice_number: Optional[str] = None
     invoice_date: Optional[str] = None
     invoice_amount: Optional[float] = None
@@ -76,6 +79,7 @@ class MatchedRecord(BaseModel):
     customer_name: str
     payment_reference: Optional[str] = None
     payment_date: Optional[str] = None
+    header_id: Optional[int] = None
     total_amount: Optional[float] = None
     confidence_label: Optional[str] = None
     confidence_score: Optional[Union[int, float]] = None

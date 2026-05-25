@@ -220,6 +220,7 @@ def _build_fused_invoice(
             fusion_amount = None
 
     return FusedInvoiceItem(
+        Line_ID=invoice.Line_ID,
         invoice_number=invoice.invoice_number,
         invoice_date=invoice.invoice_date,
         invoice_amount=invoice.invoice_amount,
