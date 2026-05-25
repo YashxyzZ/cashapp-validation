@@ -10,8 +10,10 @@
 | `invoice_date`            | No       | Empty string auto-converts to `null`                                       |
 | `invoice_amount`          | No       | Float value                                                                  |
 | `customer_invoice_number` | No       | Empty string auto-converts to `null`                                       |
-| `store_no`                | No       | Empty string auto-converts to `null`                                       |
+| `store_no` / `storeNo`   | No       | Accepts both snake_case and camelCase. Empty string auto-converts to `null`|
 | `description`             | No       | Empty string auto-converts to `null`                                       |
+
+Extra fields (e.g., `Line_ID`) are silently ignored (`extra="ignore"`).
 
 ### ReceiptRecord
 
@@ -22,7 +24,10 @@
 | `payment_date`      | No            | Empty string auto-converts to `null` |
 | `total_amount`      | No            | Float value                            |
 | `confidence_label`  | No            | Empty string auto-converts to `null` |
+| `confidence_score`  | No            | Integer or float (e.g., `80`)          |
 | `invoices`          | No            | List of `InvoiceItem` objects        |
+
+Extra fields (e.g., `header_id`) are silently ignored (`extra="ignore"`).
 
 ---
 
@@ -122,8 +127,8 @@ CSV RECEIPT_NUMBER:      "18-19/Jan/JV0899"
 ```
 Search Receipt Details CSV for rows where:
     BILL_CUSTOMER_NAME == customer_name (case-insensitive, exact)
-    AND RECEIPT_DATE == payment_date (converted to DD-MM-YYYY)
-    AND RECEIPT_AMOUNT matches total_amount (within +/-0.005)
+    AND RECEIPT_DATE matches payment_date (flexible date normalization)
+    AND abs(RECEIPT_AMOUNT) matches abs(total_amount) (within +/-0.005)
 ```
 
 - **1 match** --> DONE
@@ -136,9 +141,8 @@ Search Receipt Details CSV for rows where:
 ```
 Search Receipt Details CSV for rows where:
     BILL_CUSTOMER_NAME == customer_name (case-insensitive, exact)
-    AND payment_date IS NOT null (required for this scenario)
-    AND RECEIPT_DATE == payment_date (converted to DD-MM-YYYY)
-    AND RECEIPT_AMOUNT matches total_amount (within +/-0.005)
+    AND RECEIPT_DATE matches payment_date (flexible date normalization)
+    AND abs(RECEIPT_AMOUNT) matches abs(total_amount) (within +/-0.005)
 ```
 
 - **1 match** --> DONE
@@ -181,9 +185,32 @@ TRANSACTION_NUMBER == invoice_number (case-insensitive, exact)
 ```
 
 - **1 match** --> Populate fusion fields --> **STOP**
-- **0 or 2+** --> Go to Step 1b (only if `invoice_date` is available)
+- **0 or 2+** --> Go to Step 1a-sub
 
 *Why 1a exists:* If the invoice number is unique across the entire report, date and amount aren't needed to disambiguate.
+
+### Step 1a-sub — Substring match on invoice_number + amount
+
+**Condition:** Step 1a found 0 or 2+ matches
+
+```
+input's invoice_number appears INSIDE row's TRANSACTION_NUMBER
+    (case-insensitive, substring)
+AND abs(TOTAL_AMOUNTS) matches abs(invoice_amount) (within +/-0.005)
+```
+
+**Why this step exists:** Oracle Fusion often prefixes transaction numbers (e.g., `NF-CM-225719630729`).
+The input may only have the base number (`225719630729`). This step catches those prefixed matches.
+Amount is also compared using absolute values because credit memos are stored as negative in Oracle.
+
+**Examples:**
+```
+Input: "225719630729"    Row: "NF-CM-225719630729"   --> MATCH (substring + amount)
+Input: "25908454"        Row: "126125908454"          --> MATCH (if amount matches)
+```
+
+- **1 match** --> Populate fusion fields --> **STOP**
+- **0 or 2+** --> Go to Step 1b
 
 ### Step 1b — Exact match on invoice_number + date + amount
 
@@ -240,47 +267,54 @@ Input: "25908454"    Row: "999999999"      --> NO MATCH
 | `fusion_invoice_number` | Row's `TRANSACTION_NUMBER`                         |
 | `fusion_invoice_date`   | Row's `TRANSACTION_DATE` (converted to YYYY/MM/DD) |
 | `fusion_invoice_amount` | Row's `TOTAL_AMOUNTS` (parsed as float)            |
-| `match_step`            | Which step matched:`1a`, `1b`, `2`, or `3`   |
+| `match_step`            | Which step matched: `1a`, `1a-sub`, `1b`, `2`, or `3` |
 
 ---
 
 ## 6. Amount Matching Logic
 
-Used by both receipt and invoice matching.
+Used by both receipt and invoice matching. **Compares absolute values** because Oracle stores credit memos as negative amounts.
 
 ```
 If expected amount is null --> return False (no match possible)
 
 Parse CSV value: remove commas, convert to float
-Compare: |parsed - expected| < 0.005
+Compare: |abs(parsed) - abs(expected)| < 0.005
 ```
 
-| CSV Value      | Input Value | Difference | Match? |
-| -------------- | ----------- | ---------- | ------ |
-| `"5,000.00"` | `5000.0`  | `0.000`  | YES    |
-| `"4999.998"` | `5000.0`  | `0.002`  | YES    |
-| `"4999.99"`  | `5000.0`  | `0.010`  | NO     |
+| CSV Value       | Input Value | abs Difference | Match? |
+| --------------- | ----------- | -------------- | ------ |
+| `"5,000.00"`  | `5000.0`  | `0.000`      | YES    |
+| `"-123.65"`   | `123.65`  | `0.000`      | YES    |
+| `"4999.998"`  | `5000.0`  | `0.002`      | YES    |
+| `"4999.99"`   | `5000.0`  | `0.010`      | NO     |
 
 ---
 
-## 7. Date Conversion Logic
+## 7. Date Handling Logic
 
-Two conversions used throughout:
+All date comparisons normalize both sides to `YYYY-MM-DD` before comparing, so any format on either side works.
 
-### JSON Input --> CSV Comparison (`_convert_json_date`)
+### Supported Input Formats (`_normalize_date`)
 
-| Input Format   | Output         |
-| -------------- | -------------- |
-| `YYYY/MM/DD` | `DD-MM-YYYY` |
-| `YYYY-MM-DD` | `DD-MM-YYYY` |
-| `DD-MM-YYYY` | `DD-MM-YYYY` |
-| `DD/MM/YYYY` | `DD-MM-YYYY` |
+| Input Format     | Example           | Normalized         |
+| ---------------- | ----------------- | ------------------ |
+| `YYYY-MM-DD`   | `2026-05-15`    | `2026-05-15`     |
+| `YYYY/MM/DD`   | `2026/05/15`    | `2026-05-15`     |
+| `DD-MM-YYYY`   | `15-05-2026`    | `2026-05-15`     |
+| `DD/MM/YYYY`   | `15/05/2026`    | `2026-05-15`     |
+| `DD-Mon-YYYY`  | `15-May-2026`   | `2026-05-15`     |
+| `DD-MON-YYYY`  | `15-MAY-2026`   | `2026-05-15`     |
+| `DD-Mon-YY`    | `15-May-26`     | `2026-05-15`     |
 
-### CSV --> API Response (`_convert_csv_date`)
+### API Response Format (`_format_date_for_output`)
 
-| Input Format   | Output         |
-| -------------- | -------------- |
-| `DD-MM-YYYY` | `YYYY/MM/DD` |
+All fusion dates are returned as `YYYY/MM/DD` (e.g., `2026/05/15`).
+
+### CSV Column Normalization (`reports.py`)
+
+Oracle CSV headers are normalized on parse: stripped, uppercased, spaces replaced with underscores.
+Example: `Receipt Number` --> `RECEIPT_NUMBER`, `Bill Customer Name` --> `BILL_CUSTOMER_NAME`.
 
 ---
 
@@ -299,7 +333,7 @@ Two conversions used throughout:
    --> Returns fusion_receipt_number, fusion_receipt_date, fusion_customer_name
 
 5. For EACH invoice in record.invoices:
-   Run invoice matching (1a --> 1b --> 2 --> 3)
+   Run invoice matching (1a --> 1a-sub --> 1b --> 2 --> 3)
    --> Returns fusion_invoice_number, fusion_invoice_date, fusion_invoice_amount
 
 6. Build MatchedRecord combining:

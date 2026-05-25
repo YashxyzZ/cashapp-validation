@@ -15,6 +15,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 )
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="CashApp Remittance Validation",
@@ -57,6 +58,8 @@ def match_remittance(record: ReceiptRecord):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
+    logger.info("Fetched %d receipt rows, %d invoice rows", len(receipt_rows), len(invoice_rows))
+
     # ── 2. Receipt matching (Rule 2: A1 → A2 → B) ──
     receipt_result = match_receipt(record, receipt_rows)
 
@@ -73,6 +76,7 @@ def match_remittance(record: ReceiptRecord):
         payment_date=record.payment_date,
         total_amount=record.total_amount,
         confidence_label=record.confidence_label,
+        confidence_score=record.confidence_score,
         fusion_receipt_number=receipt_result["fusion_receipt_number"],
         fusion_receipt_date=receipt_result["fusion_receipt_date"],
         fusion_customer_name=receipt_result["fusion_customer_name"],
@@ -113,6 +117,38 @@ def post_clear_cache():
     """Force-clear the in-memory cache."""
     clear_cache()
     return {"status": "cache cleared"}
+
+
+@app.get("/reports/search")
+def search_reports(customer: str = "", invoice: str = ""):
+    """Search cached report data — verify what Oracle actually returned."""
+    try:
+        receipt_rows = get_receipt_rows()
+        invoice_rows = get_invoice_rows()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    results = {"receipt_matches": [], "invoice_matches": [], "total_receipts": len(receipt_rows), "total_invoices": len(invoice_rows)}
+
+    if customer:
+        q = customer.strip().lower()
+        results["receipt_matches"] = [
+            row for row in receipt_rows
+            if q in (row.get("BILL_CUSTOMER_NAME") or "").lower()
+        ][:10]
+        results["invoice_matches"] = [
+            row for row in invoice_rows
+            if q in (row.get("BILL_CUSTOMER_NAME") or "").lower()
+        ][:10]
+
+    if invoice:
+        q = invoice.strip().lower()
+        results["invoice_matches"] = [
+            row for row in invoice_rows
+            if q in (row.get("TRANSACTION_NUMBER") or "").lower()
+        ][:10]
+
+    return results
 
 
 @app.get("/health")

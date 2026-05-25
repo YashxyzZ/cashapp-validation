@@ -26,14 +26,14 @@ Validated JSON  <-- OUTPUT: Original fields + fusion_* fields
 ## Project Structure
 
 ```
-VALIDATION 3/
+VALIDATION 4/
 |-- .env                 # Configuration (Oracle credentials, cache TTL)
 |-- config.py            # Reads .env, exposes typed settings
 |-- models.py            # Pydantic models (input/output contracts)
 |-- cache.py             # In-memory cache (Python dict, 5-min TTL)
 |-- client.py            # Oracle BIP SOAP client
 |-- matching.py          # Core validation engine (receipt + invoice matching)
-|-- reports.py           # Report fetching orchestrator (cache + Oracle)
+|-- reports.py           # Report fetching orchestrator (cache + Oracle + CSV normalization)
 |-- main.py              # FastAPI app with endpoints
 |-- requirements.txt     # Python dependencies
 |-- VALIDATION_RULES.md  # Detailed matching rules documentation
@@ -86,6 +86,7 @@ http://localhost:8000/docs
 |----------|--------|---------|
 | `/reports/match` | POST | Validate single remittance |
 | `/reports/match/batch` | POST | Validate multiple remittances |
+| `/reports/search` | GET | Search cached data by customer or invoice (`?customer=ZACK&invoice=225719`) |
 | `/cache/info` | GET | Check cache age and row counts |
 | `/cache/clear` | POST | Force-clear the cache |
 | `/health` | GET | Health check |
@@ -100,11 +101,13 @@ POST /reports/match
   "payment_reference": "JV0899",
   "payment_date": "2024/01/15",
   "total_amount": 5000.00,
+  "confidence_score": 80,
   "invoices": [
     {
       "invoice_number": "1262018",
       "invoice_date": "2024/01/10",
-      "invoice_amount": 2500.00
+      "invoice_amount": 2500.00,
+      "storeNo": "ST001"
     }
   ]
 }
@@ -152,18 +155,19 @@ Tries 3 scenarios in order. First match wins:
 
 ### Invoice Matching (Rule 3)
 
-Tries 4 steps per invoice. First match wins:
+Tries 5 steps per invoice. First match wins:
 
 | Step | Search Criteria | When |
 |------|----------------|------|
 | 1a | `invoice_number` exact match on `TRANSACTION_NUMBER` | Always |
-| 1b | `invoice_number` + `invoice_date` + `invoice_amount` | 1a found 0 or 2+ |
+| 1a-sub | `invoice_number` SUBSTRING of `TRANSACTION_NUMBER` + amount | 1a found 0 or 2+ |
+| 1b | `invoice_number` + `invoice_date` + `invoice_amount` | 1a-sub found 0 or 2+ |
 | 2 | `customer_invoice_number` + `invoice_date` + `invoice_amount` | 1b failed |
 | 3 | `invoice_number` SUBSTRING of `TRANSACTION_NUMBER` + date + amount | Steps 1-2 failed |
 
 All matches require **exactly 1 result**. 0 or 2+ results = `null`.
 
-Amount tolerance: **+/-0.005** (handles float rounding).
+Amount tolerance: **+/-0.005** using **absolute values** (handles credit memos stored as negative in Oracle).
 
 ## Caching
 

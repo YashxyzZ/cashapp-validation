@@ -16,18 +16,34 @@ from config import (
 logger = logging.getLogger(__name__)
 
 
+def _normalize_key(key: str) -> str:
+    return key.strip().upper().replace(" ", "_")
+
+
+def _normalize_rows(rows: List[Dict]) -> List[Dict]:
+    normalized = [{_normalize_key(k): v for k, v in row.items()} for row in rows]
+    if normalized:
+        logger.info("CSV columns (normalized): %s", list(normalized[0].keys()))
+        logger.info("CSV sample row: %s", normalized[0])
+    else:
+        logger.warning("CSV returned 0 rows")
+    return normalized
+
+
 def _parse_csv_bytes(csv_bytes: bytes) -> List[Dict]:
-    """Parse raw CSV bytes into a list of row dicts."""
     text = csv_bytes.decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(text))
-    return list(reader)
+    rows = list(reader)
+    logger.info("Parsed %d rows from Oracle CSV", len(rows))
+    return _normalize_rows(rows)
 
 
 def _parse_csv_file(file_path: str) -> List[Dict]:
-    """Parse a local CSV file into a list of row dicts."""
     with open(file_path, "r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
-        return list(reader)
+        rows = list(reader)
+    logger.info("Parsed %d rows from local CSV: %s", len(rows), file_path)
+    return _normalize_rows(rows)
 
 
 def _find_local_csv(keyword: str) -> Optional[str]:

@@ -1,15 +1,17 @@
-from pydantic import BaseModel, field_validator
-from typing import Optional, List
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Optional, List, Union
 
 
 # ── Input Models (AI-extracted payload) ──
 
 class InvoiceItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
     invoice_number: Optional[str] = None
     invoice_date: Optional[str] = None
     invoice_amount: Optional[float] = None
     customer_invoice_number: Optional[str] = None
-    store_no: Optional[str] = None
+    store_no: Optional[str] = Field(None, alias="storeNo")
     description: Optional[str] = None
 
     @field_validator(
@@ -27,11 +29,14 @@ class InvoiceItem(BaseModel):
 
 
 class ReceiptRecord(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
     customer_name: str
     payment_reference: Optional[str] = None
     payment_date: Optional[str] = None
     total_amount: Optional[float] = None
     confidence_label: Optional[str] = None
+    confidence_score: Optional[Union[int, float]] = None
     invoices: List[InvoiceItem] = []
 
     @field_validator("customer_name", mode="before")
@@ -73,6 +78,7 @@ class MatchedRecord(BaseModel):
     payment_date: Optional[str] = None
     total_amount: Optional[float] = None
     confidence_label: Optional[str] = None
+    confidence_score: Optional[Union[int, float]] = None
     fusion_receipt_number: Optional[str] = None
     fusion_receipt_date: Optional[str] = None
     fusion_customer_name: Optional[str] = None

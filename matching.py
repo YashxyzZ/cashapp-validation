@@ -7,43 +7,71 @@ from config import AMOUNT_TOLERANCE
 
 logger = logging.getLogger(__name__)
 
+MONTH_MAP = {
+    "jan": "01", "feb": "02", "mar": "03", "apr": "04",
+    "may": "05", "jun": "06", "jul": "07", "aug": "08",
+    "sep": "09", "oct": "10", "nov": "11", "dec": "12",
+}
+
 
 # ═══════════════════════════════════════════════════════════════
 #  DATE HELPERS
 # ═══════════════════════════════════════════════════════════════
 
-def _convert_json_date(date_str: str) -> Optional[str]:
-    """Convert input date to DD-MM-YYYY for CSV comparison.
+def _normalize_date(date_str: str) -> Optional[str]:
+    """Normalize any date format to YYYY-MM-DD for comparison.
 
-    Accepts: YYYY/MM/DD, YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY
-    Returns: DD-MM-YYYY
+    Handles: YYYY-MM-DD, YYYY/MM/DD, DD-MM-YYYY, DD/MM/YYYY,
+             DD-Mon-YYYY, DD-MON-YYYY, MM/DD/YYYY
     """
     if not date_str:
         return None
     date_str = date_str.strip()
 
-    # YYYY/MM/DD or YYYY-MM-DD
+    # YYYY-MM-DD or YYYY/MM/DD
     m = re.match(r"^(\d{4})[/-](\d{2})[/-](\d{2})$", date_str)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+    # DD-MM-YYYY or DD/MM/YYYY
+    m = re.match(r"^(\d{2})[/-](\d{2})[/-](\d{4})$", date_str)
     if m:
         return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
 
-    # DD-MM-YYYY or DD/MM/YYYY  (already target format or close)
-    m = re.match(r"^(\d{2})[/-](\d{2})[/-](\d{4})$", date_str)
+    # DD-Mon-YYYY or DD-MON-YYYY (e.g. 15-May-2026, 15-MAY-2026)
+    m = re.match(r"^(\d{1,2})[/-]([A-Za-z]{3})[/-](\d{4})$", date_str)
     if m:
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        mon = MONTH_MAP.get(m.group(2).lower())
+        if mon:
+            return f"{m.group(3)}-{mon}-{int(m.group(1)):02d}"
+
+    # DD-Mon-YY (e.g. 15-May-26)
+    m = re.match(r"^(\d{1,2})[/-]([A-Za-z]{3})[/-](\d{2})$", date_str)
+    if m:
+        mon = MONTH_MAP.get(m.group(2).lower())
+        if mon:
+            year = int(m.group(3))
+            full_year = 2000 + year if year < 100 else year
+            return f"{full_year}-{mon}-{int(m.group(1)):02d}"
 
     return None
 
 
-def _convert_csv_date(date_str: str) -> Optional[str]:
-    """Convert DD-MM-YYYY → YYYY/MM/DD for API response."""
-    if not date_str:
-        return None
-    date_str = date_str.strip()
+def _dates_match(date_a: Optional[str], date_b: Optional[str]) -> bool:
+    if not date_a or not date_b:
+        return False
+    norm_a = _normalize_date(date_a)
+    norm_b = _normalize_date(date_b)
+    if norm_a and norm_b:
+        return norm_a == norm_b
+    return False
 
-    m = re.match(r"^(\d{2})-(\d{2})-(\d{4})$", date_str)
-    if m:
-        return f"{m.group(3)}/{m.group(2)}/{m.group(1)}"
+
+def _format_date_for_output(date_str: str) -> Optional[str]:
+    """Convert any date format → YYYY/MM/DD for API response."""
+    norm = _normalize_date(date_str)
+    if norm:
+        return norm.replace("-", "/")
     return None
 
 
@@ -52,14 +80,16 @@ def _convert_csv_date(date_str: str) -> Optional[str]:
 # ═══════════════════════════════════════════════════════════════
 
 def _amounts_match(csv_amount_str: str, expected: Optional[float]) -> bool:
-    """Check |csv_amount - expected| < 0.005 tolerance."""
+    """Check |abs(csv_amount) - abs(expected)| < tolerance.
+    Uses absolute values because Oracle stores credit memos as negative.
+    """
     if expected is None:
         return False
     try:
         csv_val = float(str(csv_amount_str).replace(",", ""))
     except (ValueError, TypeError):
         return False
-    return abs(csv_val - expected) < AMOUNT_TOLERANCE
+    return abs(abs(csv_val) - abs(expected)) < AMOUNT_TOLERANCE
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -71,7 +101,7 @@ def _extract_receipt_fields(row: Dict) -> Dict[str, Optional[str]]:
     """Pull fusion fields from a matched receipt row."""
     return {
         "fusion_receipt_number": (row.get("RECEIPT_NUMBER") or "").strip(),
-        "fusion_receipt_date": _convert_csv_date(
+        "fusion_receipt_date": _format_date_for_output(
             (row.get("RECEIPT_DATE") or "").strip()
         ),
         "fusion_customer_name": (row.get("BILL_CUSTOMER_NAME") or "").strip(),
@@ -91,8 +121,10 @@ def match_receipt(
 ) -> Dict[str, Optional[str]]:
     """Find the single matching receipt row using cascading scenarios."""
 
-    payment_date_csv = (
-        _convert_json_date(record.payment_date) if record.payment_date else None
+    logger.info(
+        "Receipt matching: customer='%s', ref='%s', date='%s', amount=%s, rows=%d",
+        record.customer_name, record.payment_reference,
+        record.payment_date, record.total_amount, len(receipt_rows),
     )
 
     # ── Scenario A: payment_reference IS provided ──
@@ -107,10 +139,10 @@ def match_receipt(
             and _amounts_match(row.get("RECEIPT_AMOUNT", ""), record.total_amount)
         ]
 
+        logger.info("A1: %d matches (ref substring + amount)", len(matches))
         if len(matches) == 1:
             result = _extract_receipt_fields(matches[0])
             result["receipt_match_scenario"] = "A1"
-            logger.info("Receipt matched via Scenario A(1)")
             return result
 
         # A(2): payment_date + customer_name + amount
@@ -119,36 +151,43 @@ def match_receipt(
             for row in receipt_rows
             if (row.get("BILL_CUSTOMER_NAME") or "").strip().lower()
             == record.customer_name.strip().lower()
-            and payment_date_csv
-            and (row.get("RECEIPT_DATE") or "").strip() == payment_date_csv
+            and _dates_match(record.payment_date, row.get("RECEIPT_DATE", ""))
             and _amounts_match(row.get("RECEIPT_AMOUNT", ""), record.total_amount)
         ]
 
+        logger.info("A2: %d matches (customer + date + amount)", len(matches))
         if len(matches) == 1:
             result = _extract_receipt_fields(matches[0])
             result["receipt_match_scenario"] = "A2"
-            logger.info("Receipt matched via Scenario A(2)")
             return result
 
     # ── Scenario B: payment_reference NULL  OR  A(1)+A(2) failed ──
-    if payment_date_csv:
-        matches = [
-            row
-            for row in receipt_rows
-            if (row.get("BILL_CUSTOMER_NAME") or "").strip().lower()
-            == record.customer_name.strip().lower()
-            and (row.get("RECEIPT_DATE") or "").strip() == payment_date_csv
-            and _amounts_match(row.get("RECEIPT_AMOUNT", ""), record.total_amount)
-        ]
+    matches = [
+        row
+        for row in receipt_rows
+        if (row.get("BILL_CUSTOMER_NAME") or "").strip().lower()
+        == record.customer_name.strip().lower()
+        and _dates_match(record.payment_date, row.get("RECEIPT_DATE", ""))
+        and _amounts_match(row.get("RECEIPT_AMOUNT", ""), record.total_amount)
+    ]
 
-        if len(matches) == 1:
-            result = _extract_receipt_fields(matches[0])
-            result["receipt_match_scenario"] = "B"
-            logger.info("Receipt matched via Scenario B")
-            return result
+    logger.info("B: %d matches (customer + date + amount)", len(matches))
+    if len(matches) == 1:
+        result = _extract_receipt_fields(matches[0])
+        result["receipt_match_scenario"] = "B"
+        return result
 
     # ── No match found across all scenarios ──
-    logger.warning("No receipt match found for customer '%s'", record.customer_name)
+    if receipt_rows:
+        sample = receipt_rows[0]
+        logger.warning(
+            "No receipt match. Sample row keys: %s, RECEIPT_DATE='%s', BILL_CUSTOMER_NAME='%s'",
+            list(sample.keys()),
+            sample.get("RECEIPT_DATE", "<MISSING>"),
+            sample.get("BILL_CUSTOMER_NAME", "<MISSING>"),
+        )
+    else:
+        logger.warning("No receipt match — Oracle returned 0 receipt rows")
     return dict(_NO_RECEIPT_MATCH)
 
 
@@ -170,7 +209,7 @@ def _build_fused_invoice(
 
     if row is not None:
         fusion_number = (row.get("TRANSACTION_NUMBER") or "").strip()
-        fusion_date = _convert_csv_date(
+        fusion_date = _format_date_for_output(
             (row.get("TRANSACTION_DATE") or "").strip()
         )
         try:
@@ -200,24 +239,27 @@ def match_invoice_item(
     """Match a single invoice line using cascading steps."""
 
     inv_num = invoice.invoice_number.strip().lower() if invoice.invoice_number else None
-    inv_date_csv = (
-        _convert_json_date(invoice.invoice_date) if invoice.invoice_date else None
-    )
     cust_name_lower = customer_name.strip().lower() if customer_name else ""
+
+    logger.info(
+        "Invoice matching: num='%s', date='%s', amount=%s, rows=%d",
+        invoice.invoice_number, invoice.invoice_date,
+        invoice.invoice_amount, len(invoice_rows),
+    )
 
     # ── Step 0: invoice_number is NULL → match by date + amount + customer ──
     if inv_num is None:
-        if inv_date_csv and invoice.invoice_amount is not None:
+        if invoice.invoice_date and invoice.invoice_amount is not None:
             matches = [
                 row
                 for row in invoice_rows
-                if (row.get("TRANSACTION_DATE") or "").strip() == inv_date_csv
+                if _dates_match(invoice.invoice_date, row.get("TRANSACTION_DATE", ""))
                 and _amounts_match(row.get("TOTAL_AMOUNTS", ""), invoice.invoice_amount)
                 and (row.get("BILL_CUSTOMER_NAME") or "").strip().lower() == cust_name_lower
             ]
 
             if len(matches) == 1:
-                logger.info("Invoice matched at Step 0 (no invoice_number, date+amount+customer)")
+                logger.info("Invoice matched at Step 0 (date+amount+customer)")
                 return _build_fused_invoice(invoice, matches[0], step="0")
 
         logger.warning("No invoice match — invoice_number is null")
@@ -230,53 +272,75 @@ def match_invoice_item(
         if (row.get("TRANSACTION_NUMBER") or "").strip().lower() == inv_num
     ]
 
+    logger.info("Step 1a: %d matches (exact invoice_number)", len(matches))
     if len(matches) == 1:
-        logger.info("Invoice '%s' matched at Step 1a", invoice.invoice_number)
         return _build_fused_invoice(invoice, matches[0], step="1a")
 
+    # ── Step 1a-sub: Substring match on invoice_number + amount ──
+    # Handles Oracle prefixed numbers like NF-CM-225719630729
+    matches = [
+        row
+        for row in invoice_rows
+        if inv_num in (row.get("TRANSACTION_NUMBER") or "").strip().lower()
+        and _amounts_match(row.get("TOTAL_AMOUNTS", ""), invoice.invoice_amount)
+    ]
+
+    logger.info("Step 1a-sub: %d matches (substring + amount)", len(matches))
+    if len(matches) == 1:
+        return _build_fused_invoice(invoice, matches[0], step="1a-sub")
+
     # ── Step 1b: invoice_number + invoice_date + invoice_amount ──
-    if inv_date_csv:
+    if invoice.invoice_date:
         matches = [
             row
             for row in invoice_rows
             if (row.get("TRANSACTION_NUMBER") or "").strip().lower() == inv_num
-            and (row.get("TRANSACTION_DATE") or "").strip() == inv_date_csv
+            and _dates_match(invoice.invoice_date, row.get("TRANSACTION_DATE", ""))
             and _amounts_match(row.get("TOTAL_AMOUNTS", ""), invoice.invoice_amount)
         ]
 
+        logger.info("Step 1b: %d matches (num + date + amount)", len(matches))
         if len(matches) == 1:
-            logger.info("Invoice '%s' matched at Step 1b", invoice.invoice_number)
             return _build_fused_invoice(invoice, matches[0], step="1b")
 
     # ── Step 2: customer_invoice_number + date + amount ──
-    if invoice.customer_invoice_number and inv_date_csv:
+    if invoice.customer_invoice_number and invoice.invoice_date:
         cust_inv_num = invoice.customer_invoice_number.strip().lower()
         matches = [
             row
             for row in invoice_rows
             if (row.get("TRANSACTION_NUMBER") or "").strip().lower() == cust_inv_num
-            and (row.get("TRANSACTION_DATE") or "").strip() == inv_date_csv
+            and _dates_match(invoice.invoice_date, row.get("TRANSACTION_DATE", ""))
             and _amounts_match(row.get("TOTAL_AMOUNTS", ""), invoice.invoice_amount)
         ]
 
+        logger.info("Step 2: %d matches (cust_inv_num + date + amount)", len(matches))
         if len(matches) == 1:
-            logger.info("Invoice '%s' matched at Step 2", invoice.invoice_number)
             return _build_fused_invoice(invoice, matches[0], step="2")
 
     # ── Step 3: Substring fallback + date + amount ──
-    if inv_date_csv:
+    if invoice.invoice_date:
         matches = [
             row
             for row in invoice_rows
             if inv_num in (row.get("TRANSACTION_NUMBER") or "").strip().lower()
-            and (row.get("TRANSACTION_DATE") or "").strip() == inv_date_csv
+            and _dates_match(invoice.invoice_date, row.get("TRANSACTION_DATE", ""))
             and _amounts_match(row.get("TOTAL_AMOUNTS", ""), invoice.invoice_amount)
         ]
 
+        logger.info("Step 3: %d matches (substring + date + amount)", len(matches))
         if len(matches) == 1:
-            logger.info("Invoice '%s' matched at Step 3 (substring)", invoice.invoice_number)
             return _build_fused_invoice(invoice, matches[0], step="3")
 
     # ── No match found ──
-    logger.warning("No invoice match found for '%s'", invoice.invoice_number)
+    if invoice_rows:
+        sample = invoice_rows[0]
+        logger.warning(
+            "No invoice match for '%s'. Sample row: TRANSACTION_NUMBER='%s', TRANSACTION_DATE='%s'",
+            invoice.invoice_number,
+            sample.get("TRANSACTION_NUMBER", "<MISSING>"),
+            sample.get("TRANSACTION_DATE", "<MISSING>"),
+        )
+    else:
+        logger.warning("No invoice match — Oracle returned 0 invoice rows")
     return _build_fused_invoice(invoice, row=None, step=None)
