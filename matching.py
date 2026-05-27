@@ -127,6 +127,8 @@ def match_receipt(
         record.payment_date, record.total_amount, len(receipt_rows),
     )
 
+    cust_name_lower = record.customer_name.strip().lower() if record.customer_name else ""
+
     # ── Scenario A: payment_reference IS provided ──
     if record.payment_reference:
 
@@ -145,37 +147,43 @@ def match_receipt(
             result["receipt_match_scenario"] = "A1"
             return result
 
-        # A(2): payment_date + customer_name + amount
+        # A(2): payment_date + customer_name + amount (requires customer_name)
+        if cust_name_lower:
+            matches = [
+                row
+                for row in receipt_rows
+                if (row.get("BILL_CUSTOMER_NAME") or "").strip().lower()
+                == cust_name_lower
+                and _dates_match(record.payment_date, row.get("RECEIPT_DATE", ""))
+                and _amounts_match(row.get("RECEIPT_AMOUNT", ""), record.total_amount)
+            ]
+
+            logger.info("A2: %d matches (customer + date + amount)", len(matches))
+            if len(matches) == 1:
+                result = _extract_receipt_fields(matches[0])
+                result["receipt_match_scenario"] = "A2"
+                return result
+        else:
+            logger.info("A2: skipped (no customer_name)")
+
+    # ── Scenario B: payment_reference NULL  OR  A(1)+A(2) failed ──
+    if cust_name_lower:
         matches = [
             row
             for row in receipt_rows
             if (row.get("BILL_CUSTOMER_NAME") or "").strip().lower()
-            == record.customer_name.strip().lower()
+            == cust_name_lower
             and _dates_match(record.payment_date, row.get("RECEIPT_DATE", ""))
             and _amounts_match(row.get("RECEIPT_AMOUNT", ""), record.total_amount)
         ]
 
-        logger.info("A2: %d matches (customer + date + amount)", len(matches))
+        logger.info("B: %d matches (customer + date + amount)", len(matches))
         if len(matches) == 1:
             result = _extract_receipt_fields(matches[0])
-            result["receipt_match_scenario"] = "A2"
+            result["receipt_match_scenario"] = "B"
             return result
-
-    # ── Scenario B: payment_reference NULL  OR  A(1)+A(2) failed ──
-    matches = [
-        row
-        for row in receipt_rows
-        if (row.get("BILL_CUSTOMER_NAME") or "").strip().lower()
-        == record.customer_name.strip().lower()
-        and _dates_match(record.payment_date, row.get("RECEIPT_DATE", ""))
-        and _amounts_match(row.get("RECEIPT_AMOUNT", ""), record.total_amount)
-    ]
-
-    logger.info("B: %d matches (customer + date + amount)", len(matches))
-    if len(matches) == 1:
-        result = _extract_receipt_fields(matches[0])
-        result["receipt_match_scenario"] = "B"
-        return result
+    else:
+        logger.info("B: skipped (no customer_name)")
 
     # ── No match found across all scenarios ──
     if receipt_rows:
@@ -250,7 +258,7 @@ def match_invoice_item(
 
     # ── Step 0: invoice_number is NULL → match by date + amount + customer ──
     if inv_num is None:
-        if invoice.invoice_date and invoice.invoice_amount is not None:
+        if cust_name_lower and invoice.invoice_date and invoice.invoice_amount is not None:
             matches = [
                 row
                 for row in invoice_rows

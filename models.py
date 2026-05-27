@@ -32,7 +32,7 @@ class InvoiceItem(BaseModel):
 class ReceiptRecord(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
-    customer_name: str
+    customer_name: Optional[str] = None
     payment_reference: Optional[str] = None
     payment_date: Optional[str] = None
     header_id: Optional[int] = None
@@ -43,9 +43,9 @@ class ReceiptRecord(BaseModel):
 
     @field_validator("customer_name", mode="before")
     @classmethod
-    def customer_name_not_empty(cls, v):
+    def clean_customer_name(cls, v):
         if not v or str(v).strip() == "":
-            raise ValueError("customer_name is required and cannot be empty")
+            return None
         return str(v).strip()
 
     @field_validator(
@@ -76,7 +76,7 @@ class FusedInvoiceItem(BaseModel):
 
 
 class MatchedRecord(BaseModel):
-    customer_name: str
+    customer_name: Optional[str] = None
     payment_reference: Optional[str] = None
     payment_date: Optional[str] = None
     header_id: Optional[int] = None
